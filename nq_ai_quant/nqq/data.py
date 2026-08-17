@@ -83,6 +83,56 @@ def _finalize(df: pd.DataFrame, source_tz: str) -> pd.DataFrame:
         idx = idx.tz_localize(source_tz, ambiguous="NaT", nonexistent="shift_forward")
     df.index = idx.tz_convert(NY)
 
+    # Fall back to tick counts when volume is identically zero
+    if "tick_volume" in df.columns:
+        vol = pd.to_numeric(df.get("volume"), errors="coerce") if "volume" in df.columns else None
+        if vol is None or float(np.nansum(np.abs(vol.to_numpy(dtype="float64")))) == 0.0:
+            log.warning("volume column is empty/zero - using tick volume instead")
+            df["volume"] = df["tick_volume"]
+        df = df.drop(columns=["tick_volume"])
+
+    missing = [c for c in OHLCV if c not in df.columns]
+    if missing:
+        raise ValueError(f"data source is missing required columns: {missing}")
+
+    df = df[OHLCV].astype("float64")
+    df = df[~df.index.isna()]
+    
+    # --- DATABENTO MULTI-CONTRACT FIX ---
+    # Sort by volume so that when multiple contracts share the same timestamp, 
+    # keep="last" preserves the highly liquid front-month contract.
+    df = df.sort_values("volume")
+    df = df[~df.index.duplicated(keep="last")].sort_index()
+    # ------------------------------------
+
+    # Drop bars with impossible geometry (bad ticks / vendor glitches).
+    ok = (
+        df[OHLCV[:4]].notna().all(axis=1)
+        & (df["high"] >= df["low"])
+        & (df["high"] >= df[["open", "close"]].max(axis=1) - 1e-9)
+        & (df["low"] <= df[["open", "close"]].min(axis=1) + 1e-9)
+        & (df["close"] > 0)
+    )
+    dropped = int((~ok).sum())
+    if dropped:
+        log.warning("dropped %d malformed bars", dropped)
+    df = df[ok]
+    df["volume"] = df["volume"].fillna(0.0)
+    return df    
+    """Coerce any adapter output into the canonical format.""";
+    df = _normalize_columns(df)
+
+    if "timestamp" in df.columns:
+        idx = pd.to_datetime(df["timestamp"], utc=False, errors="coerce")
+        df = df.drop(columns=["timestamp"])
+    else:
+        idx = pd.to_datetime(df.index, errors="coerce")
+
+    idx = pd.DatetimeIndex(idx)
+    if idx.tz is None:
+        idx = idx.tz_localize(source_tz, ambiguous="NaT", nonexistent="shift_forward")
+    df.index = idx.tz_convert(NY)
+
     # Many retail exports (MT4/MT5, some brokers) ship real volume as a column of
     # zeros and put the only usable activity measure in a tick-count column.
     # A volume series that is identically zero is worse than useless: it silently
@@ -224,7 +274,8 @@ def _load_csv(cfg: dict, timeframe: str = "15min") -> pd.DataFrame:
     dupes = int(out.index.duplicated().sum())
     if dupes:
         log.info("%d overlapping bars across files, keeping one of each", dupes)
-    return out[~out.index.duplicated(keep="last")]    path = os.path.expanduser(cfg["path"])
+    return out[~out.index.duplicated(keep="last")]   
+    path = os.path.expanduser(cfg["path"])
     files = csv_files(path)
     if not files:
         raise FileNotFoundError(
