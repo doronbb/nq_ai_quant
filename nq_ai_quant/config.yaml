@@ -1,0 +1,105 @@
+# ===========================================================================
+# NQ strategy search — configuration
+# Edit this file, then:  python run_search.py
+# ===========================================================================
+
+data:
+  # source: csv | databento | yfinance
+  #
+  # csv       most reliable, works offline, no key. Point `path` at a folder or
+  #           glob of NQ OHLCV files. Columns can be named or headerless in the
+  #           order timestamp,open,high,low,close,volume.
+  # databento recommended if you want the system to keep itself current.
+  #           dataset GLBX.MDP3, symbol NQ.c.0 (continuous front month).
+  #           Needs data.api_key or the DATABENTO_API_KEY env var.
+  # yfinance  free, no key, but only ~60 days of gappy intraday. Bootstrap only.
+  source: csv
+  # Drop CSVs in data/ and they are picked up automatically — see data/README.md.
+  # Files coarser than `timeframe` below are skipped with a warning, since bars
+  # can be resampled down but never up.
+  path: data/               # csv only: folder, single file or glob
+  # MT5-style export: timestamps are broker server time (EET/EEST). Verified by
+  # the volume profile - the busiest bar sits at 16:30 local == 09:30 New York.
+  source_tz: Europe/Athens      # csv only: tz of the timestamps in your files
+
+  # databento only
+  # api_key: db-xxxxxxxxxxxxxxxxxxxx
+  # dataset: GLBX.MDP3
+  # symbol: NQ.c.0
+  # stype_in: continuous
+  # native_timeframe: 1min
+
+  timeframe: 15min          # 1min 2min 3min 5min 10min 15min 30min 60min
+  start: null               # e.g. "2019-01-01" (null = all available)
+  end: null
+  cache_max_age_hours: 12
+
+costs:
+  # Round-trip cost in NQ POINTS, subtracted from every trade's numerator.
+  # 1 NQ point = $20. Typical retail: ~$4.50 commission round trip (0.225 pt)
+  # plus 1 tick (0.25 pt) of slippage per side => ~0.72 pt. Be conservative:
+  # a strategy that only works at zero cost is not a strategy.
+  round_trip_points: 1.0
+
+walkforward:
+  train_bars: 8000          # bars in each training window
+  test_bars: 1500           # bars in each out-of-sample window
+  anchored: false           # false = rolling window, true = expanding from bar 0
+  max_folds: 24             # 0 = use all; otherwise keep the most recent N
+
+  # The most recent N months are AMPUTATED from the search entirely: no fold,
+  # train or test, ever touches them. Once the search has picked a winner, that
+  # frozen period is the only genuinely out-of-sample test left, because the
+  # walk-forward folds stop being out-of-sample the moment you select on them.
+  #     python tools/holdout.py <fingerprint>
+  # Set to 0 to search on everything (and lose the honest verdict).
+  holdout_months: 12
+
+model:
+  backend: null             # null = auto (lightgbm > sklearn > built-in numpy)
+
+  # Threads PER WORKER, not in total. 0 means "all cores", which is actively
+  # harmful once you run more than one worker: N workers each grabbing 16
+  # threads on a 16-thread CPU spend real time fighting each other for cores.
+  #
+  # LightGBM also stops scaling well before 16 threads on training windows this
+  # small (train_bars=8000) — each thread needs enough rows to earn its keep.
+  # So: several workers, a handful of threads each, threads x workers ~= threads
+  # available. On the i5-13400F (10 cores / 16 threads): 3 workers x 5.
+  threads: 5
+
+search:
+  seed: 7
+  warmup: 60                # random strategies before evolution kicks in
+  elite_k: 25               # size of the breeding pool
+  p_crossover: 0.25
+  p_mutate: 0.55
+  min_trades: 100           # hard gate: fewer OOS trades => rejected
+  min_folds: 3              # hard gate: need this many usable folds
+  report_every: 10          # rewrite leaderboard every N strategies
+  max_duplicate_tries: 400  # consecutive dupes before widening the search
+
+  # Memoised triple-barrier walks, keyed on (atr_period, tp, sl, max_bars).
+  # Pure speed-for-RAM: once evolution is mutating around the elites, candidates
+  # share those four genes constantly, so the hit rate climbs sharply. Each
+  # entry is a few hundred MB at 200k bars; 64 is comfortable in 32GB across
+  # three workers.
+  barrier_cache: 64
+
+  # Two-stage evaluation. Stage 1 fits this many folds spread across the whole
+  # period; genomes that cannot reach min_trades, or that are clearly losing,
+  # never pay for the remaining folds. Survivors are evaluated on the folds
+  # stage 1 skipped, so a winner costs exactly the same as before.
+  # 0 disables it and evaluates every fold every time.
+  screen_folds: 6
+  # A genome is only dropped when its stage-1 edge is losing even this many
+  # standard errors ABOVE the observed mean. Comparing the raw mean to a fixed
+  # threshold instead throws away good strategies on sample noise — at 40 screen
+  # trades the standard error on R is around 0.22, which is larger than most
+  # real edges. Lower this to screen harder, at the cost of losing winners.
+  screen_z: 2.0
+  save_full_report_top_n: 10
+
+output:
+  dir: results
+  log_file: results/search.log

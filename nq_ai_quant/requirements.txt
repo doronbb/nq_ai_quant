@@ -1,0 +1,8 @@
+pandas>=2.0
+numpy>=1.24
+lightgbm>=4.0
+pyarrow>=12.0
+PyYAML>=6.0
+# --- optional data adapters (install only what you use) ---
+# yfinance>=0.2.40        # free bootstrap feed (~60 days of intraday)
+# databento>=0.34         # recommended production feed for NQ
