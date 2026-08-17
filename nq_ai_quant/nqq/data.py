@@ -154,6 +154,7 @@ def _median_spacing_minutes(idx: pd.DatetimeIndex) -> float:
 
 def _read_one(f: str, source_tz: str) -> pd.DataFrame:
     raw = pd.read_csv(f, sep=_sniff_sep(f))
+    
     # Headerless files: assume timestamp,o,h,l,c,v ordering.
     if raw.shape[1] >= 6 and not any(
         str(c).strip().lower() in _COLUMN_ALIASES or str(c).strip().lower() in OHLCV
@@ -162,11 +163,68 @@ def _read_one(f: str, source_tz: str) -> pd.DataFrame:
         raw = pd.read_csv(f, header=None, sep=_sniff_sep(f))
         raw = raw.iloc[:, :6]
         raw.columns = ["timestamp"] + OHLCV
+
+    # --- DATABENTO CLEANING FIX ---
+    # 1. Drop calendar spread contracts if present in raw CSV
+    if "symbol" in raw.columns:
+        raw = raw[~raw["symbol"].astype(str).str.contains("-", na=False)]
+    # 2. Drop EOD exchange summary bars (massive fake volume)
+    if "volume" in raw.columns:
+        raw = raw[raw["volume"] < 50000]
+    # ------------------------------
+
     return _finalize(raw, source_tz)
 
 
 def _load_csv(cfg: dict, timeframe: str = "15min") -> pd.DataFrame:
     path = os.path.expanduser(cfg["path"])
+    files = csv_files(path)
+    if not files:
+        raise FileNotFoundError(
+            f"No data files found under {path!r}. Drop your NQ OHLCV CSVs in there "
+            f"(.csv, .csv.gz, .tsv or .txt) and run again."
+        )
+
+    target = tf_minutes(timeframe)
+    log.info("reading %d data file(s) from %s", len(files), path)
+    frames = []
+    for f in files:
+        try:
+            df = _read_one(f, cfg.get("source_tz", NY))
+        except Exception as e:
+            log.warning("skipping %s — could not parse it (%s)", os.path.basename(f), e)
+            continue
+        if df.empty:
+            log.warning("skipping %s — no usable bars in it", os.path.basename(f))
+            continue
+
+        # A file coarser than the target timeframe cannot be resampled up to it,
+        # and silently mixing daily bars into a 15-minute frame would produce a
+        # series that looks fine and is nonsense. Refuse it out loud instead.
+        spacing = _median_spacing_minutes(df.index)
+        if spacing > target * 1.5:
+            log.warning(
+                "skipping %s — its bars are ~%.0f min apart, coarser than the "
+                "%s target. Lower data.timeframe to use this file.",
+                os.path.basename(f), spacing, timeframe)
+            continue
+
+        log.info("  %-28s %7d bars  ~%.0fmin  %s -> %s", os.path.basename(f), len(df),
+                 spacing, df.index[0].date(), df.index[-1].date())
+        frames.append(df)
+
+    if not frames:
+        raise ValueError(
+            f"None of the {len(files)} file(s) under {path!r} are usable at "
+            f"timeframe={timeframe}. See the warnings above.")
+
+    out = pd.concat(frames).sort_index()
+    # Overlapping files (a fresh export on top of an old one) resolve to the
+    # most recently sorted value rather than duplicating the bar.
+    dupes = int(out.index.duplicated().sum())
+    if dupes:
+        log.info("%d overlapping bars across files, keeping one of each", dupes)
+    return out[~out.index.duplicated(keep="last")]    path = os.path.expanduser(cfg["path"])
     files = csv_files(path)
     if not files:
         raise FileNotFoundError(

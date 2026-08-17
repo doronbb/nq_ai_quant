@@ -20,7 +20,7 @@ data:
   path: data/               # csv only: folder, single file or glob
   # MT5-style export: timestamps are broker server time (EET/EEST). Verified by
   # the volume profile - the busiest bar sits at 16:30 local == 09:30 New York.
-  source_tz: Europe/Athens      # csv only: tz of the timestamps in your files
+  source_tz: UTC      # csv only: tz of the timestamps in your files
 
   # databento only
   # api_key: db-xxxxxxxxxxxxxxxxxxxx
